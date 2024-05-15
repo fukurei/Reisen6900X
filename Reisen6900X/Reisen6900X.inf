@@ -1,0 +1,62 @@
+;
+; Reisen6900X.inf
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System ; TODO: specify appropriate Class
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318} ; TODO: specify appropriate ClassGuid
+Provider    = %ManufacturerName%
+CatalogFile = Reisen6900X.cat
+DriverVer   = ; TODO: set DriverVer in stampinf property pages
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+Reisen6900X.sys = 1,,
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName% = Standard,NT$ARCH$.10.0...16299 ; %13% support introduced in build 16299
+
+[Standard.NT$ARCH$.10.0...16299]
+%Reisen6900X.DeviceDesc% = Reisen6900X_Device, Root\Reisen6900X ; TODO: edit hw-id
+
+[Reisen6900X_Device.NT]
+CopyFiles = File_Copy
+
+[File_Copy]
+Reisen6900X.sys
+
+;-------------- Service installation
+[Reisen6900X_Device.NT.Services]
+AddService = Reisen6900X,%SPSVCINST_ASSOCSERVICE%, Reisen6900X_Service_Inst
+
+; -------------- Reisen6900X driver install sections
+[Reisen6900X_Service_Inst]
+DisplayName    = %Reisen6900X.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\Reisen6900X.sys
+
+[Reisen6900X_Device.NT.Wdf]
+KmdfService = Reisen6900X, Reisen6900X_wdfsect
+
+[Reisen6900X_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName = "<Your manufacturer name>" ;TODO: Replace with your manufacturer name
+DiskName = "Reisen6900X Installation Disk"
+Reisen6900X.DeviceDesc = "Reisen6900X Device"
+Reisen6900X.SVCDESC = "Reisen6900X Service"
