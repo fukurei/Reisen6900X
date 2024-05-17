@@ -37,6 +37,26 @@ STATUS VMX::InitializeVMX() {
 		return status = STAT_ERROR_KNOWN;
 	}
 
+	auto ProcessorCount = KeQueryActiveProcessorCount(0);
+
+	for (auto ProcessorID = 0; ProcessorID < ProcessorCount; ProcessorID++) {
+
+		auto GuestState = &Global::g_GuestState[ProcessorID];
+
+		if (AllocateVMMStack(GuestState) || AllocateIoBitmaps(GuestState) || AllocateMSRBitmap(GuestState) ) {
+			return status = STAT_ERROR_KNOWN;
+		}
+
+	}
+
+	Global::g_MsrBitmapInvalidMsrs = AllocateInvalidMSRBitmap();
+	if (!Global::g_MsrBitmapInvalidMsrs) {
+		LOGERR("Insufficient memory while allocating Invalid MSR Bitmap");
+		return status = STAT_ERROR_KNOWN;
+	}
+
+	KeGenericCallDpc(DpcRoutineInitializeGuest, 0);
+
 	return status = STAT_SUCCESS;
 
 }
@@ -294,4 +314,920 @@ STATUS VMX::AllocateVMXONRegion(PVIRTUAL_MACHINE_STATE Vcpu) {
 	Vcpu->VmxonRegionVirtualAddress = (UINT64)VmxonRegion;
 
 	return status = STAT_SUCCESS;
+}
+
+STATUS VMX::AllocateVMMStack(PVIRTUAL_MACHINE_STATE Vcpu) {
+	
+	STATUS status = STAT_ERROR_UNKNOWN;
+
+	//
+	// Allocate stack for the Host CPU
+	//
+	Vcpu->VmmStack = (UINT64)AllocateZeroedNonPagedPool(VMM_STACK_SIZE);
+
+	if (!Vcpu->VmmStack) {
+		LOGERR("Insufficient Memory for allocating VMM Stack");
+		return status = STAT_ERROR_KNOWN;
+	}
+
+	LOGINF("VMM Stack for logical processor : 0x%llx", Vcpu->VmmStack);
+	return status = STAT_SUCCESS;
+
+}
+
+STATUS VMX::AllocateMSRBitmap(PVIRTUAL_MACHINE_STATE Vcpu) {
+
+	STATUS status = STAT_ERROR_UNKNOWN;
+
+	//
+	// Allocate memory for MSR Bitmap
+	// Should be aligned
+	//
+	Vcpu->MsrBitmapVirtualAddress = (UINT64)AllocateZeroedNonPagedPool(PAGE_SIZE);
+
+	if (!Vcpu->MsrBitmapVirtualAddress)
+	{
+		LOGERR("Insufficient memory in allocating MSR Bitmaps");
+		return status = STAT_ERROR_KNOWN;
+	}
+
+	Vcpu->MsrBitmapPhysicalAddress = VirtualAddressToPhysicalAddress((PVOID)Vcpu->MsrBitmapVirtualAddress);
+
+	LOGINF("MSR Bitmap virtual address  : 0x%llx", Vcpu->MsrBitmapVirtualAddress);
+	LOGINF("MSR Bitmap physical address : 0x%llx", Vcpu->MsrBitmapPhysicalAddress);
+
+	return status = STAT_SUCCESS;
+
+}
+
+STATUS VMX::AllocateIoBitmaps(PVIRTUAL_MACHINE_STATE Vcpu) {
+
+	STATUS status = STAT_ERROR_UNKNOWN;
+
+	//
+	// Allocate memory for I/O Bitmap (A)
+	//
+	Vcpu->IoBitmapVirtualAddressA = (UINT64)AllocateZeroedNonPagedPool(PAGE_SIZE); // should be aligned
+
+	if (!Vcpu->IoBitmapVirtualAddressA)
+	{
+		LOGERR("Insufficient memory in allocating I/O Bitmaps A");
+		return status = STAT_ERROR_KNOWN;
+	}
+
+	Vcpu->IoBitmapPhysicalAddressA = VirtualAddressToPhysicalAddress((PVOID)Vcpu->IoBitmapVirtualAddressA);
+
+	LOGINF("I/O Bitmap A Virtual Address  : 0x%llx", Vcpu->IoBitmapVirtualAddressA);
+	LOGINF("I/O Bitmap A Physical Address : 0x%llx", Vcpu->IoBitmapPhysicalAddressA);
+
+	//
+	// Allocate memory for I/O Bitmap (B)
+	//
+	Vcpu->IoBitmapVirtualAddressB = (UINT64)AllocateZeroedNonPagedPool(PAGE_SIZE); // should be aligned
+
+	if (!Vcpu->IoBitmapVirtualAddressB)
+	{
+		LOGERR("Insufficient memory in allocating I/O Bitmaps B");
+		return status = STAT_ERROR_KNOWN;
+	}
+
+	Vcpu->IoBitmapPhysicalAddressB = VirtualAddressToPhysicalAddress((PVOID)Vcpu->IoBitmapVirtualAddressB);
+
+	LOGINF("I/O Bitmap B virtual address  : 0x%llx", Vcpu->IoBitmapVirtualAddressB);
+	LOGINF("I/O Bitmap B physical address : 0x%llx", Vcpu->IoBitmapPhysicalAddressB);
+
+	return status = STAT_SUCCESS;
+}
+
+PVOID VMX::AllocateInvalidMSRBitmap() {
+
+	PVOID InvalidMsrBitmap;
+
+	InvalidMsrBitmap = AllocateZeroedNonPagedPool(0x1000 / 0x8);
+
+	if (InvalidMsrBitmap == NULL)
+	{
+		return NULL;
+	}
+
+	for (UINT32 i = 0; i < 0x1000; ++i)
+	{
+		// Let's test MSR's and censor GP's unless we get unexpected BSOD lol
+		__try
+		{
+			__readmsr(i);
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			SetBit(i, (unsigned long*)InvalidMsrBitmap);
+		}
+	}
+
+	return InvalidMsrBitmap;
+}
+
+VOID VMX::DpcRoutineInitializeGuest(KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2) {
+	UNREFERENCED_PARAMETER(Dpc);
+	UNREFERENCED_PARAMETER(DeferredContext);
+
+	//
+	// Save the vmx state and prepare vmcs setup and finally execute vmlaunch instruction
+	//
+	AsmVmxSaveState();
+
+	//
+	// Wait for all DPCs to synchronize at this point
+	//
+	KeSignalCallDpcSynchronize(SystemArgument2);
+
+	//
+	// Mark the DPC as being complete
+	//
+	KeSignalCallDpcDone(SystemArgument1);
+}
+
+BOOLEAN VMX::VirtualizeCurrentSystem(PVOID GuestStack) {
+
+	UINT64                  ErrorCode = 0;
+	ULONG                   CurrentCore = KeGetCurrentProcessorNumberEx(NULL);
+	VIRTUAL_MACHINE_STATE* VCpu = &Global::g_GuestState[CurrentCore];
+
+	LOGINF("Virtualizing current system (logical core : 0x%x)", CurrentCore);
+
+	//
+	// Clear the VMCS State
+	//
+	if (!VmxClearVmcsState(VCpu))
+	{
+		LOGINF("Err, failed to clear vmcs");
+		return FALSE;
+	}
+
+	//
+	// Load VMCS (Set the Current VMCS)
+	//
+	if (!VmxLoadVmcs(VCpu))
+	{
+		LOGINF("Err, failed to load vmcs");
+		return FALSE;
+	}
+
+	LOGINF("Setting up VMCS for current logical core");
+
+	VmxSetupVmcs(VCpu, GuestStack);
+
+	LOGINF("Executing VMLAUNCH on logical core %d", CurrentCore);
+
+	VCpu->HasLaunched = TRUE;
+	__vmx_vmlaunch();
+
+	//
+	// ******** if Vmlaunch succeed will never be here ! ********
+	//
+
+	VCpu->HasLaunched = FALSE;
+
+	//
+	// Read error code firstly
+	//
+	__vmx_vmread(VMCS_VM_INSTRUCTION_ERROR, &ErrorCode);
+
+	LOGERR("Err, unable to execute VMLAUNCH, status : 0x%llx", ErrorCode);
+
+	//
+	// Then Execute Vmxoff
+	//
+	__vmx_off();
+	LOGERR("Err, VMXOFF Executed Successfully but it was because of an error");
+
+	return FALSE;
+}
+
+_Use_decl_annotations_
+BOOLEAN
+VMX::VmxClearVmcsState(VIRTUAL_MACHINE_STATE* VCpu)
+{
+	UINT8 VmclearStatus;
+
+	//
+	// Clear the state of the VMCS to inactive
+	//
+	VmclearStatus = __vmx_vmclear(&VCpu->VmcsRegionPhysicalAddress);
+
+	LOGINF("VMCS VMCLEAR status : 0x%x", VmclearStatus);
+
+	if (VmclearStatus)
+	{
+		//
+		// Otherwise terminate the VMX
+		//
+		LOGINF("VMCS failed to clear, status : 0x%x", VmclearStatus);
+		__vmx_off();
+		return FALSE;
+	}
+	return TRUE;
+}
+
+_Use_decl_annotations_
+BOOLEAN
+VMX::VmxLoadVmcs(VIRTUAL_MACHINE_STATE* VCpu)
+{
+	int VmptrldStatus;
+
+	VmptrldStatus = __vmx_vmptrld(&VCpu->VmcsRegionPhysicalAddress);
+	if (VmptrldStatus)
+	{
+		LOGINF("VMCS failed to load, status : 0x%x", VmptrldStatus);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+inline UCHAR
+VMX::VmxVmwrite16(size_t Field,
+	UINT16 FieldValue)
+{
+	UINT64 TargetValue = 0;
+	TargetValue = (UINT64)FieldValue;
+	return __vmx_vmwrite((size_t)Field, (size_t)TargetValue);
+}
+
+inline UCHAR
+VMX::VmxVmwrite32(size_t Field,
+	UINT32 FieldValue)
+{
+	UINT64 TargetValue = 0;
+	TargetValue = (UINT64)FieldValue;
+	return __vmx_vmwrite((size_t)Field, (size_t)TargetValue);
+}
+
+inline UCHAR
+VMX::VmxVmwrite64(size_t Field,
+	UINT64 FieldValue)
+{
+	return __vmx_vmwrite((size_t)Field, (size_t)FieldValue);
+}
+
+inline UINT64
+VMX::VmxVmread64(size_t Field)
+{
+	UINT64 TargetField;
+	__vmx_vmread((size_t)Field, (size_t*)&TargetField);
+	return TargetField;
+}
+
+inline UINT32
+VMX::VmxVmread32(size_t Field)
+{
+	UINT64 TargetField;
+	__vmx_vmread((size_t)Field, (size_t*)&TargetField);
+	return (UINT16)(TargetField & 0xFFFFFFFF);
+}
+
+inline UINT16
+VMX::VmxVmread16(size_t Field)
+{
+	UINT64 TargetField;
+	__vmx_vmread((size_t)Field, (size_t*)&TargetField);
+	return (UINT16)(TargetField & 0xFFFF);
+}
+
+inline UCHAR
+VMX::VmxVmread64P(size_t   Field,
+	UINT64* FieldValue)
+{
+	return __vmx_vmread((size_t)Field, (size_t*)FieldValue);
+}
+
+_Use_decl_annotations_
+BOOLEAN
+VMX::VmxSetupVmcs(VIRTUAL_MACHINE_STATE* VCpu, PVOID GuestStack) {
+
+	UINT32                  CpuBasedVmExecControls;
+	UINT32                  SecondaryProcBasedVmExecControls;
+	PVOID                   HostRsp;
+	UINT64                  GdtBase = 0;
+	VMX_SEGMENT_SELECTOR    SegmentSelector = { 0 };
+	IA32_VMX_BASIC_REGISTER VmxBasicMsr = { 0 };
+
+	//
+	// Reading IA32_VMX_BASIC_MSR
+	//
+	VmxBasicMsr.AsUInt = __readmsr(IA32_VMX_BASIC);
+
+	VmxVmwrite64(VMCS_HOST_ES_SELECTOR, AsmGetEs() & 0xF8);
+	VmxVmwrite64(VMCS_HOST_CS_SELECTOR, AsmGetCs() & 0xF8);
+	VmxVmwrite64(VMCS_HOST_SS_SELECTOR, AsmGetSs() & 0xF8);
+	VmxVmwrite64(VMCS_HOST_DS_SELECTOR, AsmGetDs() & 0xF8);
+	VmxVmwrite64(VMCS_HOST_FS_SELECTOR, AsmGetFs() & 0xF8);
+	VmxVmwrite64(VMCS_HOST_GS_SELECTOR, AsmGetGs() & 0xF8);
+	VmxVmwrite64(VMCS_HOST_TR_SELECTOR, AsmGetTr() & 0xF8);
+
+	//
+	// Setting the link pointer to the required value for 4KB VMCS
+	//
+	VmxVmwrite64(VMCS_GUEST_VMCS_LINK_POINTER, ~0ULL);
+
+	VmxVmwrite64(VMCS_GUEST_DEBUGCTL, __readmsr(IA32_DEBUGCTL) & 0xFFFFFFFF);
+	VmxVmwrite64(VMCS_GUEST_DEBUGCTL_HIGH, __readmsr(IA32_DEBUGCTL) >> 32);
+
+	//
+	// ******* Time-stamp counter offset *******
+	//
+	VmxVmwrite64(VMCS_CTRL_TSC_OFFSET, 0);
+
+	VmxVmwrite64(VMCS_CTRL_PAGEFAULT_ERROR_CODE_MASK, 0);
+	VmxVmwrite64(VMCS_CTRL_PAGEFAULT_ERROR_CODE_MATCH, 0);
+
+	VmxVmwrite64(VMCS_CTRL_VMEXIT_MSR_STORE_COUNT, 0);
+	VmxVmwrite64(VMCS_CTRL_VMEXIT_MSR_LOAD_COUNT, 0);
+
+	VmxVmwrite64(VMCS_CTRL_VMENTRY_MSR_LOAD_COUNT, 0);
+	VmxVmwrite64(VMCS_CTRL_VMENTRY_INTERRUPTION_INFORMATION_FIELD, 0);
+
+	GdtBase = AsmGetGdtBase();
+
+	HvFillGuestSelectorData((PVOID)GdtBase, ES, AsmGetEs());
+	HvFillGuestSelectorData((PVOID)GdtBase, CS, AsmGetCs());
+	HvFillGuestSelectorData((PVOID)GdtBase, SS, AsmGetSs());
+	HvFillGuestSelectorData((PVOID)GdtBase, DS, AsmGetDs());
+	HvFillGuestSelectorData((PVOID)GdtBase, FS, AsmGetFs());
+	HvFillGuestSelectorData((PVOID)GdtBase, GS, AsmGetGs());
+	HvFillGuestSelectorData((PVOID)GdtBase, LDTR, AsmGetLdtr());
+	HvFillGuestSelectorData((PVOID)GdtBase, TR, AsmGetTr());
+
+	VmxVmwrite64(VMCS_GUEST_FS_BASE, __readmsr(IA32_FS_BASE));
+	VmxVmwrite64(VMCS_GUEST_GS_BASE, __readmsr(IA32_GS_BASE));
+	
+	CpuBasedVmExecControls = HvAdjustControls(CPU_BASED_ACTIVATE_IO_BITMAP | CPU_BASED_ACTIVATE_MSR_BITMAP | CPU_BASED_ACTIVATE_SECONDARY_CONTROLS,
+		VmxBasicMsr.VmxControls ? IA32_VMX_TRUE_PROCBASED_CTLS : IA32_VMX_PROCBASED_CTLS);
+
+	VmxVmwrite64(VMCS_CTRL_PROCESSOR_BASED_VM_EXECUTION_CONTROLS, CpuBasedVmExecControls);
+
+	LOGINF("CPU Based VM Exec Controls (Based on %s) : 0x%x",
+		VmxBasicMsr.VmxControls ? "IA32_VMX_TRUE_PROCBASED_CTLS" : "IA32_VMX_PROCBASED_CTLS",
+		CpuBasedVmExecControls);
+
+	SecondaryProcBasedVmExecControls = HvAdjustControls(CPU_BASED_CTL2_RDTSCP | CPU_BASED_CTL2_ENABLE_EPT | CPU_BASED_CTL2_ENABLE_INVPCID | CPU_BASED_CTL2_ENABLE_XSAVE_XRSTORS | CPU_BASED_CTL2_ENABLE_VPID,
+		IA32_VMX_PROCBASED_CTLS2);
+
+	VmxVmwrite64(VMCS_CTRL_SECONDARY_PROCESSOR_BASED_VM_EXECUTION_CONTROLS, SecondaryProcBasedVmExecControls);
+
+	LOGINF("Secondary Proc Based VM Exec Controls (IA32_VMX_PROCBASED_CTLS2) : 0x%x", SecondaryProcBasedVmExecControls);
+
+	VmxVmwrite64(VMCS_CTRL_PIN_BASED_VM_EXECUTION_CONTROLS, HvAdjustControls(0, VmxBasicMsr.VmxControls ? IA32_VMX_TRUE_PINBASED_CTLS : IA32_VMX_PINBASED_CTLS));
+
+	VmxVmwrite64(VMCS_CTRL_PRIMARY_VMEXIT_CONTROLS, HvAdjustControls(VM_EXIT_HOST_ADDR_SPACE_SIZE, VmxBasicMsr.VmxControls ? IA32_VMX_TRUE_EXIT_CTLS : IA32_VMX_EXIT_CTLS));
+
+	VmxVmwrite64(VMCS_CTRL_VMENTRY_CONTROLS, HvAdjustControls(VM_ENTRY_IA32E_MODE, VmxBasicMsr.VmxControls ? IA32_VMX_TRUE_ENTRY_CTLS : IA32_VMX_ENTRY_CTLS));
+
+	VmxVmwrite64(VMCS_CTRL_CR0_GUEST_HOST_MASK, 0);
+	VmxVmwrite64(VMCS_CTRL_CR4_GUEST_HOST_MASK, 0);
+
+	VmxVmwrite64(VMCS_CTRL_CR0_READ_SHADOW, 0);
+	VmxVmwrite64(VMCS_CTRL_CR4_READ_SHADOW, 0);
+
+	VmxVmwrite64(VMCS_GUEST_CR0, __readcr0());
+	VmxVmwrite64(VMCS_GUEST_CR3, __readcr3());
+	VmxVmwrite64(VMCS_GUEST_CR4, __readcr4());
+
+	VmxVmwrite64(VMCS_GUEST_DR7, 0x400);
+
+	VmxVmwrite64(VMCS_HOST_CR0, __readcr0());
+	VmxVmwrite64(VMCS_HOST_CR4, __readcr4());
+
+	//
+	// Because we may be executing in an arbitrary user-mode, process as part
+	// of the DPC interrupt we execute in We have to save Cr3, for VMCS_HOST_CR3
+	//
+
+	VmxVmwrite64(VMCS_HOST_CR3, LayoutGetSystemDirectoryTableBase());
+
+	VmxVmwrite64(VMCS_GUEST_GDTR_BASE, AsmGetGdtBase());
+	VmxVmwrite64(VMCS_GUEST_IDTR_BASE, AsmGetIdtBase());
+
+	VmxVmwrite64(VMCS_GUEST_GDTR_LIMIT, AsmGetGdtLimit());
+	VmxVmwrite64(VMCS_GUEST_IDTR_LIMIT, AsmGetIdtLimit());
+
+	VmxVmwrite64(VMCS_GUEST_RFLAGS, AsmGetRflags());
+
+	VmxVmwrite64(VMCS_GUEST_SYSENTER_CS, __readmsr(IA32_SYSENTER_CS));
+	VmxVmwrite64(VMCS_GUEST_SYSENTER_EIP, __readmsr(IA32_SYSENTER_EIP));
+	VmxVmwrite64(VMCS_GUEST_SYSENTER_ESP, __readmsr(IA32_SYSENTER_ESP));
+
+	VmxGetSegmentDescriptor((PUCHAR)AsmGetGdtBase(), AsmGetTr(), &SegmentSelector);
+	VmxVmwrite64(VMCS_HOST_TR_BASE, SegmentSelector.Base);
+
+	VmxVmwrite64(VMCS_HOST_FS_BASE, __readmsr(IA32_FS_BASE));
+	VmxVmwrite64(VMCS_HOST_GS_BASE, __readmsr(IA32_GS_BASE));
+
+	VmxVmwrite64(VMCS_HOST_GDTR_BASE, AsmGetGdtBase());
+	VmxVmwrite64(VMCS_HOST_IDTR_BASE, AsmGetIdtBase());
+
+	VmxVmwrite64(VMCS_HOST_SYSENTER_CS, __readmsr(IA32_SYSENTER_CS));
+	VmxVmwrite64(VMCS_HOST_SYSENTER_EIP, __readmsr(IA32_SYSENTER_EIP));
+	VmxVmwrite64(VMCS_HOST_SYSENTER_ESP, __readmsr(IA32_SYSENTER_ESP));
+
+	//
+	// Set MSR Bitmaps
+	//
+	VmxVmwrite64(VMCS_CTRL_MSR_BITMAP_ADDRESS, VCpu->MsrBitmapPhysicalAddress);
+
+	//
+	// Set I/O Bitmaps
+	//
+	VmxVmwrite64(VMCS_CTRL_IO_BITMAP_A_ADDRESS, VCpu->IoBitmapPhysicalAddressA);
+	VmxVmwrite64(VMCS_CTRL_IO_BITMAP_B_ADDRESS, VCpu->IoBitmapPhysicalAddressB);
+
+	//
+	// Set up EPT
+	//
+	VmxVmwrite64(VMCS_CTRL_EPT_POINTER, VCpu->EptPointer.AsUInt);
+
+	//
+	// Set up VPID
+
+	//
+	// For all processors, we will use a VPID = 1. This allows the processor to separate caching
+	//  of EPT structures away from the regular OS page translation tables in the TLB.
+	//
+	VmxVmwrite64(VIRTUAL_PROCESSOR_ID, VPID_TAG);
+
+	//
+	// setup guest rsp
+	//
+	VmxVmwrite64(VMCS_GUEST_RSP, (UINT64)GuestStack);
+
+	//
+	// setup guest rip
+	//
+	VmxVmwrite64(VMCS_GUEST_RIP, (UINT64)AsmVmxRestoreState);
+
+	//
+	// Stack should be aligned to 16 because we wanna save XMM and FPU registers and those instructions
+	// needs alignment to 16
+	//
+	HostRsp = (PVOID)((UINT64)VCpu->VmmStack + VMM_STACK_SIZE - 1);
+	HostRsp = ((PVOID)((ULONG_PTR)(HostRsp) & ~(16 - 1)));
+	VmxVmwrite64(VMCS_HOST_RSP, (UINT64)HostRsp);
+	VmxVmwrite64(VMCS_HOST_RIP, (UINT64)AsmVmexitHandler);
+
+	return TRUE;
+
+}
+
+VOID
+VMX::HvFillGuestSelectorData(PVOID GdtBase, UINT32 SegmentRegister, UINT16 Selector)
+{
+	VMX_SEGMENT_SELECTOR SegmentSelector = { 0 };
+
+	VmxGetSegmentDescriptor((PUCHAR)GdtBase, Selector, &SegmentSelector);
+
+	if (Selector == 0x0)
+	{
+		SegmentSelector.Attributes.Unusable = TRUE;
+	}
+
+	SegmentSelector.Attributes.Reserved1 = 0;
+	SegmentSelector.Attributes.Reserved2 = 0;
+
+	VmxVmwrite64(VMCS_GUEST_ES_SELECTOR + SegmentRegister * 2, Selector);
+	VmxVmwrite64(VMCS_GUEST_ES_LIMIT + SegmentRegister * 2, SegmentSelector.Limit);
+	VmxVmwrite64(VMCS_GUEST_ES_ACCESS_RIGHTS + SegmentRegister * 2, SegmentSelector.Attributes.AsUInt);
+	VmxVmwrite64(VMCS_GUEST_ES_BASE + SegmentRegister * 2, SegmentSelector.Base);
+}
+
+_Use_decl_annotations_
+BOOLEAN
+VMX::VmxGetSegmentDescriptor(PUCHAR GdtBase, UINT16 Selector, PVMX_SEGMENT_SELECTOR SegmentSelector) {
+
+	SEGMENT_DESCRIPTOR_32* DescriptorTable32;
+	SEGMENT_DESCRIPTOR_32* Descriptor32;
+	SEGMENT_SELECTOR        SegSelector = { .AsUInt = Selector };
+
+	if (!SegmentSelector)
+		return FALSE;
+
+#define SELECTOR_TABLE_LDT 0x1
+#define SELECTOR_TABLE_GDT 0x0
+
+	//
+	// Ignore LDT
+	//
+	if ((Selector == 0x0) || (SegSelector.Table != SELECTOR_TABLE_GDT))
+	{
+		return FALSE;
+	}
+
+	DescriptorTable32 = (SEGMENT_DESCRIPTOR_32*)(GdtBase);
+	Descriptor32 = &DescriptorTable32[SegSelector.Index];
+
+	SegmentSelector->Selector = Selector;
+	SegmentSelector->Limit = __segmentlimit(Selector);
+	SegmentSelector->Base = ((UINT64)Descriptor32->BaseAddressLow | (UINT64)Descriptor32->BaseAddressMiddle << 16 | (UINT64)Descriptor32->BaseAddressHigh << 24);
+
+	SegmentSelector->Attributes.AsUInt = (AsmGetAccessRights(Selector) >> 8);
+
+	if (SegSelector.Table == 0 && SegSelector.Index == 0)
+	{
+		SegmentSelector->Attributes.Unusable = TRUE;
+	}
+
+	if ((Descriptor32->Type == SEGMENT_DESCRIPTOR_TYPE_TSS_BUSY) || (Descriptor32->Type == SEGMENT_DESCRIPTOR_TYPE_CALL_GATE))
+	{
+		//
+		// this is a TSS or callgate etc, save the base high part
+		//
+
+		UINT64 SegmentLimitHigh;
+		SegmentLimitHigh = (*(UINT64*)((PUCHAR)Descriptor32 + 8));
+		SegmentSelector->Base = (SegmentSelector->Base & 0xffffffff) | (SegmentLimitHigh << 32);
+	}
+
+	if (SegmentSelector->Attributes.Granularity)
+	{
+		//
+		// 4096-bit granularity is enabled for this segment, scale the limit
+		//
+		SegmentSelector->Limit = (SegmentSelector->Limit << 12) + 0xfff;
+	}
+
+	return TRUE;
+
+}
+
+UINT32
+VMX::HvAdjustControls(UINT32 Ctl, UINT32 Msr)
+{
+	MSR MsrValue = { 0 };
+
+	MsrValue.Flags = __readmsr(Msr);
+	Ctl &= MsrValue.Fields.High; /* bit == 0 in high word ==> must be zero */
+	Ctl |= MsrValue.Fields.Low;  /* bit == 1 in low word  ==> must be one  */
+	return Ctl;
+}
+
+UINT64
+VMX::LayoutGetSystemDirectoryTableBase()
+{
+	//
+	// Return CR3 of the system process.
+	//
+	NT_KPROCESS* SystemProcess = (NT_KPROCESS*)(PsInitialSystemProcess);
+	return SystemProcess->DirectoryTableBase;
+}
+
+VOID VMX::Vmresume() {
+
+	UINT64 ErrorCode = 0;
+
+	__vmx_vmresume();
+
+	//
+	// if VMRESUME succeed will never be here !
+	//
+
+	__vmx_vmread(VMCS_VM_INSTRUCTION_ERROR, &ErrorCode);
+	__vmx_off();
+
+	//
+	// It's such a bad error because we don't where to go !
+	// prefer to break
+	//
+	LOGERR("Err,  in executing VMRESUME , status : 0x%llx", ErrorCode);
+
+}
+
+UINT64 VMX::ReturnStackPointerForVmxoff() {
+	return Global::g_GuestState[KeGetCurrentProcessorNumberEx(NULL)].VmxoffState.GuestRsp;
+}
+
+UINT64 VMX::ReturnInstructionPointerForVmxoff() {
+	return Global::g_GuestState[KeGetCurrentProcessorNumberEx(NULL)].VmxoffState.GuestRip;
+}
+
+BOOLEAN
+VMX::VmexitHandler(PGUEST_REGS GuestRegs) {
+
+	//DbgBreakPoint();
+
+	UINT32                  ExitReason = 0;
+	BOOLEAN                 Result = FALSE;
+	BOOLEAN                 ShouldEmulateRdtscp = TRUE;
+	VIRTUAL_MACHINE_STATE* VCpu = NULL;
+
+	VCpu = &Global::g_GuestState[KeGetCurrentProcessorNumberEx(NULL)];
+	VCpu->Regs = GuestRegs;
+	VCpu->IsOnVmxRootMode = TRUE;
+
+	ExitReason = VmxVmread32(VMCS_EXIT_REASON);
+	ExitReason &= 0xffff;
+
+	VCpu->IncrementRip = TRUE;
+
+	//
+	// Save the current rip
+	//
+	__vmx_vmread(VMCS_GUEST_RIP, &VCpu->LastVmexitRip);
+
+	//
+	// Set the rsp in general purpose registers structure
+	//
+	__vmx_vmread(VMCS_GUEST_RSP, &VCpu->Regs->rsp);
+
+	//
+	// Read the exit qualification
+	//
+	VCpu->ExitQualification = VmxVmread32(VMCS_EXIT_QUALIFICATION);
+
+	//
+	// Debugging purpose
+	//
+	//LOGINF("VM_EXIT_REASON : 0x%x", ExitReason);
+	//LOGINF("VMCS_EXIT_QUALIFICATION : 0x%llx", VCpu->ExitQualification);
+
+	//
+	// 
+	// -=-=-=-=-= VMEXIT HANDLING =-=-=-=-=-
+
+	//
+	// We have to handle at least "two" of these, unless it causes livelock
+	// 1. PpmInitializeGuest constantly uses rdmsr instruction
+	// 2. HalpHvTimerArm constantly uses wrmsr instruction
+	//
+	switch (ExitReason) {
+
+	case VMX_EXIT_REASON_EXECUTE_RDMSR: {
+
+		PGUEST_REGS GuestRegs = VCpu->Regs;
+		MSR    Msr = { 0 };
+		UINT32 TargetMsr;
+
+		TargetMsr = GuestRegs->rcx & 0xffffffff;
+
+		if ((TargetMsr <= 0x00001FFF) || ((0xC0000000 <= TargetMsr) && (TargetMsr <= 0xC0001FFF)) ||
+			(TargetMsr >= RESERVED_MSR_RANGE_LOW && (TargetMsr <= RESERVED_MSR_RANGE_HI)))
+		{
+			switch (TargetMsr)
+			{
+			case IA32_SYSENTER_CS:
+				VmxVmread64P(VMCS_GUEST_SYSENTER_CS, &Msr.Flags);
+				break;
+
+			case IA32_SYSENTER_ESP:
+				VmxVmread64P(VMCS_GUEST_SYSENTER_ESP, &Msr.Flags);
+				break;
+
+			case IA32_SYSENTER_EIP:
+				VmxVmread64P(VMCS_GUEST_SYSENTER_EIP, &Msr.Flags);
+				break;
+
+			case IA32_GS_BASE:
+				VmxVmread64P(VMCS_GUEST_GS_BASE, &Msr.Flags);
+				break;
+
+			case IA32_FS_BASE:
+				VmxVmread64P(VMCS_GUEST_FS_BASE, &Msr.Flags);
+				break;
+
+			case HV_X64_MSR_GUEST_IDLE:
+
+				break;
+
+			default:
+
+				//
+				// Check whether the MSR should cause #GP or not
+				//
+				if (TargetMsr <= 0xfff && TestBit(TargetMsr, (unsigned long*)Global::g_MsrBitmapInvalidMsrs) != 0)
+				{
+					//
+					// Invalid MSR between 0x0 to 0xfff
+					//
+					EventInjectGeneralProtection();
+					return Result = FALSE;
+				}
+
+				//
+				// Msr is valid
+				//
+				Msr.Flags = __readmsr(TargetMsr);
+
+				//
+				// Check if it's EFER MSR then we show a false SCE state
+				//
+				if (GuestRegs->rcx == IA32_EFER)
+				{
+					IA32_EFER_REGISTER MsrEFER;
+					MsrEFER.AsUInt = Msr.Flags;
+					MsrEFER.SyscallEnable = TRUE;
+					Msr.Flags = MsrEFER.AsUInt;
+				}
+
+				break;
+			}
+
+			GuestRegs->rax = 0;
+			GuestRegs->rdx = 0;
+
+			GuestRegs->rax = Msr.Fields.Low;
+			GuestRegs->rdx = Msr.Fields.High;
+		}
+		else
+		{
+			//
+			// MSR is invalid, inject #GP
+			//
+			EventInjectGeneralProtection();
+			return Result = FALSE;
+		}
+
+	}
+
+	case VMX_EXIT_REASON_EXECUTE_WRMSR: {
+		
+		PGUEST_REGS GuestRegs = VCpu->Regs;
+		MSR     Msr = { 0 };
+		UINT32  TargetMsr;
+		BOOLEAN UnusedIsKernel;
+
+		TargetMsr = GuestRegs->rcx & 0xffffffff;
+
+		Msr.Fields.Low = (ULONG)GuestRegs->rax;
+		Msr.Fields.High = (ULONG)GuestRegs->rdx;
+
+		//
+		// Check for sanity of MSR if they're valid or they're for reserved range for WRMSR and RDMSR
+		//
+		if ((TargetMsr <= 0x00001FFF) || ((0xC0000000 <= TargetMsr) && (TargetMsr <= 0xC0001FFF)) ||
+			(TargetMsr >= RESERVED_MSR_RANGE_LOW && (TargetMsr <= RESERVED_MSR_RANGE_HI)))
+		{
+			//
+			// If the source register contains a non-canonical address and ECX specifies
+			// one of the following MSRs:
+			//
+			// IA32_DS_AREA, IA32_FS_BASE, IA32_GS_BASE, IA32_KERNEL_GSBASE, IA32_LSTAR,
+			// IA32_SYSENTER_EIP, IA32_SYSENTER_ESP
+			//
+			switch (TargetMsr)
+			{
+			case IA32_DS_AREA:
+			case IA32_FS_BASE:
+			case IA32_GS_BASE:
+			case IA32_KERNEL_GS_BASE:
+			case IA32_LSTAR:
+			case IA32_SYSENTER_EIP:
+			case IA32_SYSENTER_ESP:
+
+				if (!EPT::CheckAddressCanonicality(Msr.Flags, &UnusedIsKernel))
+				{
+					//
+					// Address is not canonical, inject #GP
+					//
+					EventInjectGeneralProtection();
+
+					return Result = FALSE;
+				}
+
+				break;
+			}
+
+			switch (TargetMsr)
+			{
+			case IA32_SYSENTER_CS:
+				VmxVmwrite64(VMCS_GUEST_SYSENTER_CS, Msr.Flags);
+				break;
+
+			case IA32_SYSENTER_ESP:
+				VmxVmwrite64(VMCS_GUEST_SYSENTER_ESP, Msr.Flags);
+				break;
+
+			case IA32_SYSENTER_EIP:
+				VmxVmwrite64(VMCS_GUEST_SYSENTER_EIP, Msr.Flags);
+				break;
+
+			case IA32_GS_BASE:
+				VmxVmwrite64(VMCS_GUEST_GS_BASE, Msr.Flags);
+				break;
+
+			case IA32_FS_BASE:
+				VmxVmwrite64(VMCS_GUEST_FS_BASE, Msr.Flags);
+				break;
+
+			default:
+
+				__writemsr((unsigned long)GuestRegs->rcx, Msr.Flags);
+				break;
+			}
+		}
+		else
+		{
+			EventInjectGeneralProtection();
+			return Result = FALSE;
+		}
+	}
+
+	}
+
+	// -=-=-=-=-= VMEXIT HANDLING =-=-=-=-=-
+	//
+	//
+
+	//
+	// Check whether we need to increment the guest's ip or not
+	// Also, we should not increment rip if a vmxoff executed
+	//
+	if (!VCpu->VmxoffState.IsVmxoffExecuted && VCpu->IncrementRip)
+	{
+		HvResumeToNextInstruction();
+	}
+
+	//
+	// Check for vmxoff request
+	//
+	if (VCpu->VmxoffState.IsVmxoffExecuted)
+	{
+		Result = TRUE;
+	}
+
+	VCpu->IsOnVmxRootMode = FALSE;
+	
+	return Result; // TODO: Make VMXOFF working, currently crashing with double fault
+}
+
+VOID
+VMX::HvResumeToNextInstruction()
+{
+	UINT64 ResumeRIP = 0;
+	UINT64 CurrentRIP = 0;
+	size_t ExitInstructionLength = 0;
+
+	__vmx_vmread(VMCS_GUEST_RIP, &CurrentRIP);
+	__vmx_vmread(VMCS_VMEXIT_INSTRUCTION_LENGTH, &ExitInstructionLength);
+
+	ResumeRIP = CurrentRIP + ExitInstructionLength;
+
+	//LOGINF("Current RIP: %llx, Instruction Length: %llx, Resume RIP: %llx\n", CurrentRIP, ExitInstructionLength, ResumeRIP);
+	//DbgBreakPoint();
+
+	VmxVmwrite64(VMCS_GUEST_RIP, ResumeRIP);
+}
+
+/*
+Assembly Wrappers Start
+*/
+
+extern "C" BOOLEAN VmxVirtualizeCurrentSystem(PVOID GuestStack) {
+	return VMX::VirtualizeCurrentSystem(GuestStack);
+}
+
+extern "C" BOOLEAN VmxVmexitHandler(PGUEST_REGS GuestRegs) {
+	return VMX::VmexitHandler(GuestRegs);
+}
+
+extern "C" UINT64 VmxReturnStackPointerForVmxoff() {
+	return VMX::ReturnStackPointerForVmxoff();
+}
+
+extern "C" UINT64 VmxReturnInstructionPointerForVmxoff() {
+	return VMX::ReturnInstructionPointerForVmxoff();
+}
+
+extern "C" VOID VmxVmresume() {
+	return VMX::Vmresume();
+}
+
+/*
+Assembly Wrappers End
+*/
+
+
+
+VOID
+VMX::EventInjectInterruption(INTERRUPT_TYPE InterruptionType, EXCEPTION_VECTORS Vector, BOOLEAN DeliverErrorCode, UINT32 ErrorCode)
+{
+	INTERRUPT_INFO Inject = { 0 };
+	Inject.Fields.Valid = TRUE;
+	Inject.Fields.InterruptType = InterruptionType;
+	Inject.Fields.Vector = Vector;
+	Inject.Fields.DeliverCode = DeliverErrorCode;
+
+	VmxVmwrite64(VMCS_CTRL_VMENTRY_INTERRUPTION_INFORMATION_FIELD, Inject.Flags);
+
+	if (DeliverErrorCode)
+	{
+		VmxVmwrite64(VMCS_CTRL_VMENTRY_EXCEPTION_ERROR_CODE, ErrorCode);
+	}
+}
+
+VOID
+VMX::EventInjectGeneralProtection()
+{
+	UINT32 ExitInstrLength;
+
+	EventInjectInterruption(INTERRUPT_TYPE_HARDWARE_EXCEPTION, EXCEPTION_VECTOR_GENERAL_PROTECTION_FAULT, TRUE, 0);
+
+	ExitInstrLength = VmxVmread32(VMCS_VMEXIT_INSTRUCTION_LENGTH);
+	VmxVmwrite64(VMCS_CTRL_VMENTRY_INSTRUCTION_LENGTH, ExitInstrLength);
+
 }

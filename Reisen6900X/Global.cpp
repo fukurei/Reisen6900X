@@ -4,6 +4,10 @@
 
 #include "Global.h"
 
+VIRTUAL_MACHINE_STATE* Global::g_GuestState = NULL;
+PVOID Global::g_MsrBitmapInvalidMsrs = NULL;
+BOOLEAN Global::g_TransparentMode = TRUE;
+
 STATUS Global::InitializeGuestState() {
 
     STATUS status = STAT_ERROR_UNKNOWN;

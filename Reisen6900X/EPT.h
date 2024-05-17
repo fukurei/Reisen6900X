@@ -207,5 +207,10 @@ namespace EPT
     */
     PEPT_PML2_ENTRY EPTGetPml2Entry(PVMM_EPT_PAGE_TABLE EptPageTable, SIZE_T PhysicalAddress);
 
+    //
+    // Summary: Kernel? UM?
+    //
+    BOOLEAN
+        CheckAddressCanonicality(UINT64 VAddr, PBOOLEAN IsKernelAddress);
 };
 

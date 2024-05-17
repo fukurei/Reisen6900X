@@ -595,3 +595,50 @@ PEPT_PML2_ENTRY EPT::EPTGetPml2Entry(PVMM_EPT_PAGE_TABLE EptPageTable, SIZE_T Ph
 	PML2 = &EptPageTable->PML2[DirectoryPointer][Directory];
 	return PML2;
 }
+
+BOOLEAN
+EPT::CheckAddressCanonicality(UINT64 VAddr, PBOOLEAN IsKernelAddress)
+{
+	UINT64 Addr = (UINT64)VAddr;
+	UINT64 MaxVirtualAddrLowHalf, MinVirtualAddressHighHalf;
+
+	//
+	// Get processor's address width for VA
+	//
+	UINT32 AddrWidth = g_CompatibilityChecks.VirtualAddressWidth;
+
+	//
+	// get max address in lower-half canonical addr space
+	// e.g. if width is 48, then 0x00007FFF_FFFFFFFF
+	//
+	MaxVirtualAddrLowHalf = ((UINT64)1ull << (AddrWidth - 1)) - 1;
+
+	//
+	// get min address in higher-half canonical addr space
+	// e.g., if width is 48, then 0xFFFF8000_00000000
+	//
+	MinVirtualAddressHighHalf = ~MaxVirtualAddrLowHalf;
+
+	//
+	// Check to see if the address in a canonical address
+	//
+	if ((Addr > MaxVirtualAddrLowHalf) && (Addr < MinVirtualAddressHighHalf))
+	{
+		*IsKernelAddress = FALSE;
+		return FALSE;
+	}
+
+	//
+	// Set whether it's a kernel address or not
+	//
+	if (MinVirtualAddressHighHalf < Addr)
+	{
+		*IsKernelAddress = TRUE;
+	}
+	else
+	{
+		*IsKernelAddress = FALSE;
+	}
+
+	return TRUE;
+}

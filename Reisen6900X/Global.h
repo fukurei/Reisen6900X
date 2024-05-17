@@ -311,7 +311,17 @@ namespace Global
     //
     // Summary: Save state for guests
     //
-    inline VIRTUAL_MACHINE_STATE* g_GuestState;
+    extern VIRTUAL_MACHINE_STATE* g_GuestState;
+
+    //
+    // Summary: Global Invalid MSR Bitmap
+    //
+    extern PVOID g_MsrBitmapInvalidMsrs;
+
+    //
+    // Summary: Stealth??
+    //
+    extern BOOLEAN g_TransparentMode;
 
     //
     // Summary: Initialize Guest State
@@ -320,4 +330,3 @@ namespace Global
     STATUS InitializeGuestState();
 
 };
-
