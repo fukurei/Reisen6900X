@@ -205,3 +205,20 @@ NTSTATUS VMExitHandler::HandleVMCall(PVIRTUAL_MACHINE_STATE VCpu, UINT64 VmcallN
 	return VmcallStatus;
 }
 
+VOID VMExitHandler::HandleCPUID(PVIRTUAL_MACHINE_STATE VCpu) {
+
+	INT32       CpuInfo[4];
+	PGUEST_REGS Regs = VCpu->Regs;
+
+	__cpuidex(CpuInfo, (INT32)Regs->rax, (INT32)Regs->rcx);
+
+
+	//
+	// Copy the values from the logical processor registers into the VP GPRs
+	//
+	Regs->rax = CpuInfo[0];
+	Regs->rbx = CpuInfo[1];
+	Regs->rcx = CpuInfo[2];
+	Regs->rdx = CpuInfo[3];
+
+}

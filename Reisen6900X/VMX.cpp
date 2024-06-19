@@ -934,6 +934,13 @@ VMX::VmexitHandler(PGUEST_REGS GuestRegs) {
 		break;
 	}
 
+	case VMX_EXIT_REASON_EXECUTE_CPUID: {
+
+		VMExitHandler::HandleCPUID(VCpu);
+
+		break;
+	}
+
 	}
 
 	// -=-=-=-=-= VMEXIT HANDLING =-=-=-=-=-

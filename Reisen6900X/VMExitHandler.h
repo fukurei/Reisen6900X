@@ -21,4 +21,6 @@ namespace VMExitHandler {
 	// Handle VMCall
 	NTSTATUS HandleVMCall(PVIRTUAL_MACHINE_STATE VCpu, UINT64 num, UINT64 Op1, UINT64 Op2, UINT64 Op3);
 
+	VOID HandleCPUID(PVIRTUAL_MACHINE_STATE VCpu);
+
 }

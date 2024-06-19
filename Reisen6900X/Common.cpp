@@ -141,6 +141,8 @@ EventInjectInterruption(INTERRUPT_TYPE InterruptionType, EXCEPTION_VECTORS Vecto
     Inject.Fields.Vector = Vector;
     Inject.Fields.DeliverCode = DeliverErrorCode;
 
+    LOGINF("Injected Int");
+
     VmxVmwrite64(VMCS_CTRL_VMENTRY_INTERRUPTION_INFORMATION_FIELD, Inject.Flags);
 
     if (DeliverErrorCode)
