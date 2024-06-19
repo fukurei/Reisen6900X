@@ -120,6 +120,8 @@
     <ClCompile Include="Driver.cpp" />
     <ClCompile Include="EPT.cpp" />
     <ClCompile Include="Global.cpp" />
+    <ClCompile Include="VMCall.cpp" />
+    <ClCompile Include="VMExitHandler.cpp" />
     <ClCompile Include="VMX.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -127,6 +129,8 @@
     <ClInclude Include="EPT.h" />
     <ClInclude Include="Global.h" />
     <ClInclude Include="ia32.h" />
+    <ClInclude Include="VMCall.h" />
+    <ClInclude Include="VMExitHandler.h" />
     <ClInclude Include="VMX.h" />
   </ItemGroup>
   <ItemGroup>

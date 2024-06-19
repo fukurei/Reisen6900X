@@ -5,22 +5,12 @@
 #pragma once
 
 #include "Common.h"
-#include "EPT.h"
+#include "VMExitHandler.h"
 
 #define VMXON_SIZE 4096
 #define VMCS_SIZE 4096
 #define VMM_STACK_SIZE 0x8000
 #define ALIGNMENT_PAGE_SIZE 4096
-
-// Undefined VMCS Selector in ia32.h
-
-#define VMCS_GUEST_DEBUGCTL_HIGH 0x2803
-#define VIRTUAL_PROCESSOR_ID     0x00000000
-#define VPID_TAG 0x1
-
-#define HV_X64_MSR_GUEST_IDLE 0x400000F0
-#define RESERVED_MSR_RANGE_LOW 0x40000000
-#define RESERVED_MSR_RANGE_HI  0x400000F0
 
 /**
  * @brief PIN-Based Execution
@@ -207,128 +197,26 @@ extern "C" void AsmVmxRestoreState();
 
 // VMX Utils
 
-/**
- * @brief Get CS Register
- *
- * @return unsigned short
- */
-extern "C" unsigned short
-AsmGetCs();
-
-/**
- * @brief Get DS Register
- *
- * @return unsigned short
- */
-extern "C" unsigned short
-AsmGetDs();
-
-/**
- * @brief Get ES Register
- *
- * @return unsigned short
- */
-extern "C" unsigned short
-AsmGetEs();
-
-/**
- * @brief Get SS Register
- *
- * @return unsigned short
- */
-extern "C" unsigned short
-AsmGetSs();
-
-/**
- * @brief Get FS Register
- *
- * @return unsigned short
- */
-extern "C" unsigned short
-AsmGetFs();
-
-/**
- * @brief Get GS Register
- *
- * @return unsigned short
- */
-extern "C" unsigned short
-AsmGetGs();
-
-/**
- * @brief Get LDTR Register
- *
- * @return unsigned short
- */
-extern "C" unsigned short
-AsmGetLdtr();
-
-/**
- * @brief Get TR Register
- *
- * @return unsigned short
- */
-extern "C" unsigned short
-AsmGetTr();
-
-/* ******* Gdt related functions ******* */
-
-/**
- * @brief get GDT base
- *
- * @return unsigned long long
- */
-extern "C" unsigned long long inline AsmGetGdtBase();
-
-/**
- * @brief Get GDT Limit
- *
- * @return unsigned short
- */
-extern "C" unsigned short
-AsmGetGdtLimit();
-
-/* ******* Idt related functions ******* */
-
-/**
- * @brief Get IDT base
- *
- * @return unsigned long long
- */
-extern "C" unsigned long long inline AsmGetIdtBase();
-
-/**
- * @brief Get IDT limit
- *
- * @return unsigned short
- */
-extern "C" unsigned short
-AsmGetIdtLimit();
-
-extern "C" UINT32
-AsmGetAccessRights(unsigned short Selector);
-
-/**
- * @brief Get R/EFLAGS
- *
- * @return unsigned short
- */
-extern "C" unsigned short
-AsmGetRflags();
-
-/**
- * @brief Vm-exit handler
- *
- */
-extern "C" void
-AsmVmexitHandler();
-
 extern "C" BOOLEAN VmxVirtualizeCurrentSystem(PVOID GuestStack);
 
 extern "C" BOOLEAN VmxVmexitHandler(PGUEST_REGS GuestRegs);
 extern "C" UINT64 VmxReturnStackPointerForVmxoff();
 extern "C" UINT64 VmxReturnInstructionPointerForVmxoff();
 extern "C" VOID VmxVmresume();
+
+/**
+ * @brief Request Vmcall
+ *
+ * @param VmcallNumber
+ * @param OptionalParam1
+ * @param OptionalParam2
+ * @param OptionalParam3
+ * @return NTSTATUS
+ */
+extern "C" NTSTATUS inline AsmVmxVmcall(unsigned long long VmcallNumber,
+	unsigned long long OptionalParam1,
+	unsigned long long OptionalParam2,
+	long long          OptionalParam3);
 
 /*
 Assembly End
@@ -426,6 +314,11 @@ namespace VMX
 	VOID DpcRoutineInitializeGuest(KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2);
 
 	//
+	// Summary: Broadcast for `VmxTerminate`
+	//
+	VOID DpcRoutineTerminateGuest(KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2);
+
+	//
 	// Summary: VM Exit Handler
 	// Returns: TRUE if VMX off is executed, else for not.
 	//
@@ -463,84 +356,24 @@ namespace VMX
 	VOID
 		Vmresume();
 
+	// Ye, it is for terminating VMX
+	// It is likely 'root' function of VMX termination something
+	VOID
+		VmxPerformTermination();
+
+
+	/**
+	 * @brief Broadcast to terminate VMX on all logical cores
+	 *
+	 * @return BOOLEAN Returns true if vmxoff successfully executed in vmcall or otherwise
+	 * returns false
+	 */
+	BOOLEAN 
+		VmxTerminate();
+
 	// -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 	// |               VM UTILS AREA                       |
 	// -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-
-	/**
-	 * @brief Clearing Vmcs status using vmclear instruction
-	 *
-	 * @param VCpu
-	 * @return BOOLEAN If vmclear execution was successful it returns true
-	 * otherwise and if there was error with vmclear then it returns false
-	 */
-	_Use_decl_annotations_
-		BOOLEAN
-		VmxClearVmcsState(VIRTUAL_MACHINE_STATE* VCpu);
-
-	/**
-	 * @brief Implementation of VMPTRLD instruction
-	 *
-	 * @param VCpu
-	 * @return BOOLEAN If vmptrld was unsuccessful then it returns false otherwise
-	 * it returns false
-	 */
-	_Use_decl_annotations_
-		BOOLEAN
-		VmxLoadVmcs(VIRTUAL_MACHINE_STATE* VCpu);
-
-	/**
-	 * @brief VMX VMWRITE instruction (64-bit)
-	 * @param Field
-	 * @param FieldValue
-	 *
-	 * @return UCHAR
-	 */
-	inline UCHAR
-		VmxVmwrite64(size_t Field,
-			UINT64 FieldValue);
-
-	/**
-	 * @brief VMX VMWRITE instruction (32-bit)
-	 * @param Field
-	 * @param FieldValue
-	 *
-	 * @return UCHAR
-	 */
-	inline UCHAR
-		VmxVmwrite32(size_t Field,
-			UINT32 FieldValue);
-
-	/**
-	 * @brief VMX VMWRITE instruction (16-bit)
-	 * @param Field
-	 * @param FieldValue
-	 *
-	 * @return UCHAR
-	 */
-	inline UCHAR
-		VmxVmwrite16(size_t Field,
-			UINT16 FieldValue);
-
-	/**
-	 * @brief VMX VMREAD instruction (64-bit)
-	 * @param Field
-	 * @param FieldValue
-	 *
-	 * @return UCHAR
-	 */
-	inline UCHAR
-		VmxVmread64P(size_t   Field,
-			UINT64* FieldValue);
-
-	inline UINT16
-		VmxVmread16(size_t Field);
-
-	inline UINT32
-		VmxVmread32(size_t Field);
-
-	inline UINT64
-		VmxVmread64(size_t Field);
 
 	/**
 	 * @brief Create and Configure a Vmcs Layout
@@ -594,16 +427,5 @@ namespace VMX
 	 */
 	UINT64
 		LayoutGetSystemDirectoryTableBase();
-
-	//
-	// test area it'll be optimized in future
-	//
-
-
-	VOID
-		EventInjectInterruption(INTERRUPT_TYPE InterruptionType, EXCEPTION_VECTORS Vector, BOOLEAN DeliverErrorCode, UINT32 ErrorCode);
-
-	VOID
-		EventInjectGeneralProtection();
 };
 

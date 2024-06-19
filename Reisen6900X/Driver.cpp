@@ -6,7 +6,8 @@
 
 VOID DriverExit(_In_ PDRIVER_OBJECT DriverObject) {
 	UNREFERENCED_PARAMETER(DriverObject);
-
+	LOGINF("Exiting...");
+	VMX::VmxPerformTermination();
 	return;
 }
 
@@ -26,7 +27,7 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 		return STATUS_UNSUCCESSFUL;
 	}
 
-	LOGINF("Test success!");
+	LOGINF("Test Success!!!!!!\n");
 
 	return STATUS_SUCCESS;
 }

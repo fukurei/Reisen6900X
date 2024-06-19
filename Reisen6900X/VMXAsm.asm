@@ -22,6 +22,10 @@ PUBLIC AsmGetRflags
 
 PUBLIC AsmVmexitHandler
 
+PUBLIC AsmReloadGdtr
+PUBLIC AsmReloadIdtr
+PUBLIC AsmVmxVmcall
+
 EXTERN VmxVmexitHandler:PROC
 EXTERN VmxVmresume:PROC
 EXTERN VmxReturnStackPointerForVmxoff:PROC
@@ -248,7 +252,7 @@ AsmGetRflags ENDP
 ;------------------------------------------------------------------------
 
 AsmVmexitHandler PROC
-    
+
     push 0  ; we might be in an unaligned stack state, so the memory before stack might cause 
             ; irql less or equal as it doesn't exist, so we just put some extra space avoid
             ; these kind of errors
@@ -360,5 +364,60 @@ RestoreState:
 AsmVmxoffHandler ENDP
 
 ;------------------------------------------------------------------------
+
+AsmVmxVmcall PROC
+
+    pushfq
+
+    push    r10
+    push    r11
+    push    r12
+    mov     r10, 48564653H          ; [HVFS]
+    mov     r11, 564d43414c4cH      ; [VMCALL]
+    mov     r12, 4e4f485950455256H  ; [NOHYPERV]
+    vmcall                          ; VmxVmcallHandler(UINT64 VmcallNumber, UINT64 OptionalParam1, UINT64 OptionalParam2, UINT64 OptionalParam3)
+    pop     r12
+    pop     r11
+    pop     r10
+
+    popfq
+    ret                             ; Return type is NTSTATUS and it's on RAX from the previous function, no need to change anything
+
+AsmVmxVmcall ENDP
+
+;------------------------------------------------------------------------
+
+; AsmReloadGdtr (PVOID GdtBase (rcx), UINT32 GdtLimit (rdx) );
+
+AsmReloadGdtr PROC
+
+    push	rcx
+    shl		rdx, 48
+    push	rdx
+    lgdt	fword ptr [rsp+6]	; do not try to modify stack selector with this ;)
+    pop		rax
+    pop		rax
+    ret
+    
+AsmReloadGdtr ENDP
+
+;------------------------------------------------------------------------
+
+; AsmReloadIdtr (PVOID IdtBase (rcx), UINT32 IdtLimit (rdx) );
+
+AsmReloadIdtr PROC
+    
+    push	rcx
+    shl		rdx, 48
+    push	rdx
+    lidt	fword ptr [rsp+6]
+    pop		rax
+    pop		rax
+    ret
+    
+AsmReloadIdtr ENDP
+
+;------------------------------------------------------------------------
+
 
 END

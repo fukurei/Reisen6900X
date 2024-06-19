@@ -57,7 +57,15 @@ STATUS VMX::InitializeVMX() {
 
 	KeGenericCallDpc(DpcRoutineInitializeGuest, 0);
 
-	return status = STAT_SUCCESS;
+	//DbgBreakPoint();
+
+	if (AsmVmxVmcall(VMCALL_TEST, 0x6974, 0xDEAD, 0x523) == STATUS_SUCCESS) {
+		return status = STAT_SUCCESS;
+	}
+	else {
+		LOGERR("Some function just got jerked");
+		return status = STAT_ERROR_UNKNOWN;
+	}
 
 }
 
@@ -446,6 +454,29 @@ VOID VMX::DpcRoutineInitializeGuest(KDPC* Dpc, PVOID DeferredContext, PVOID Syst
 	KeSignalCallDpcDone(SystemArgument1);
 }
 
+VOID VMX::DpcRoutineTerminateGuest(KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2) {
+	UNREFERENCED_PARAMETER(Dpc);
+	UNREFERENCED_PARAMETER(DeferredContext);
+
+	//
+	// Terminate Vmx using vmcall
+	//
+	if (!VmxTerminate())
+	{
+		LOGERR("Err, there were an error terminating vmx");
+	}
+
+	//
+	// Wait for all DPCs to synchronize at this point
+	//
+	KeSignalCallDpcSynchronize(SystemArgument2);
+
+	//
+	// Mark the DPC as being complete
+	//
+	KeSignalCallDpcDone(SystemArgument1);
+}
+
 BOOLEAN VMX::VirtualizeCurrentSystem(PVOID GuestStack) {
 
 	UINT64                  ErrorCode = 0;
@@ -501,102 +532,6 @@ BOOLEAN VMX::VirtualizeCurrentSystem(PVOID GuestStack) {
 	LOGERR("Err, VMXOFF Executed Successfully but it was because of an error");
 
 	return FALSE;
-}
-
-_Use_decl_annotations_
-BOOLEAN
-VMX::VmxClearVmcsState(VIRTUAL_MACHINE_STATE* VCpu)
-{
-	UINT8 VmclearStatus;
-
-	//
-	// Clear the state of the VMCS to inactive
-	//
-	VmclearStatus = __vmx_vmclear(&VCpu->VmcsRegionPhysicalAddress);
-
-	LOGINF("VMCS VMCLEAR status : 0x%x", VmclearStatus);
-
-	if (VmclearStatus)
-	{
-		//
-		// Otherwise terminate the VMX
-		//
-		LOGINF("VMCS failed to clear, status : 0x%x", VmclearStatus);
-		__vmx_off();
-		return FALSE;
-	}
-	return TRUE;
-}
-
-_Use_decl_annotations_
-BOOLEAN
-VMX::VmxLoadVmcs(VIRTUAL_MACHINE_STATE* VCpu)
-{
-	int VmptrldStatus;
-
-	VmptrldStatus = __vmx_vmptrld(&VCpu->VmcsRegionPhysicalAddress);
-	if (VmptrldStatus)
-	{
-		LOGINF("VMCS failed to load, status : 0x%x", VmptrldStatus);
-		return FALSE;
-	}
-	return TRUE;
-}
-
-inline UCHAR
-VMX::VmxVmwrite16(size_t Field,
-	UINT16 FieldValue)
-{
-	UINT64 TargetValue = 0;
-	TargetValue = (UINT64)FieldValue;
-	return __vmx_vmwrite((size_t)Field, (size_t)TargetValue);
-}
-
-inline UCHAR
-VMX::VmxVmwrite32(size_t Field,
-	UINT32 FieldValue)
-{
-	UINT64 TargetValue = 0;
-	TargetValue = (UINT64)FieldValue;
-	return __vmx_vmwrite((size_t)Field, (size_t)TargetValue);
-}
-
-inline UCHAR
-VMX::VmxVmwrite64(size_t Field,
-	UINT64 FieldValue)
-{
-	return __vmx_vmwrite((size_t)Field, (size_t)FieldValue);
-}
-
-inline UINT64
-VMX::VmxVmread64(size_t Field)
-{
-	UINT64 TargetField;
-	__vmx_vmread((size_t)Field, (size_t*)&TargetField);
-	return TargetField;
-}
-
-inline UINT32
-VMX::VmxVmread32(size_t Field)
-{
-	UINT64 TargetField;
-	__vmx_vmread((size_t)Field, (size_t*)&TargetField);
-	return (UINT16)(TargetField & 0xFFFFFFFF);
-}
-
-inline UINT16
-VMX::VmxVmread16(size_t Field)
-{
-	UINT64 TargetField;
-	__vmx_vmread((size_t)Field, (size_t*)&TargetField);
-	return (UINT16)(TargetField & 0xFFFF);
-}
-
-inline UCHAR
-VMX::VmxVmread64P(size_t   Field,
-	UINT64* FieldValue)
-{
-	return __vmx_vmread((size_t)Field, (size_t*)FieldValue);
 }
 
 _Use_decl_annotations_
@@ -920,7 +855,7 @@ VMX::VmexitHandler(PGUEST_REGS GuestRegs) {
 	VCpu->Regs = GuestRegs;
 	VCpu->IsOnVmxRootMode = TRUE;
 
-	ExitReason = VmxVmread32(VMCS_EXIT_REASON);
+	ExitReason = VmxVmRead32(VMCS_EXIT_REASON);
 	ExitReason &= 0xffff;
 
 	VCpu->IncrementRip = TRUE;
@@ -938,7 +873,7 @@ VMX::VmexitHandler(PGUEST_REGS GuestRegs) {
 	//
 	// Read the exit qualification
 	//
-	VCpu->ExitQualification = VmxVmread32(VMCS_EXIT_QUALIFICATION);
+	VCpu->ExitQualification = VmxVmRead32(VMCS_EXIT_QUALIFICATION);
 
 	//
 	// Debugging purpose
@@ -950,181 +885,83 @@ VMX::VmexitHandler(PGUEST_REGS GuestRegs) {
 	// 
 	// -=-=-=-=-= VMEXIT HANDLING =-=-=-=-=-
 
-	//
-	// We have to handle at least "two" of these, unless it causes livelock
-	// 1. PpmInitializeGuest constantly uses rdmsr instruction
-	// 2. HalpHvTimerArm constantly uses wrmsr instruction
-	//
 	switch (ExitReason) {
 
 	case VMX_EXIT_REASON_EXECUTE_RDMSR: {
 
-		PGUEST_REGS GuestRegs = VCpu->Regs;
-		MSR    Msr = { 0 };
-		UINT32 TargetMsr;
+		auto HandleResult = VMExitHandler::HandleRDMSR(VCpu);
 
-		TargetMsr = GuestRegs->rcx & 0xffffffff;
+		if (HandleResult == FALSE) return Result = FALSE;
 
-		if ((TargetMsr <= 0x00001FFF) || ((0xC0000000 <= TargetMsr) && (TargetMsr <= 0xC0001FFF)) ||
-			(TargetMsr >= RESERVED_MSR_RANGE_LOW && (TargetMsr <= RESERVED_MSR_RANGE_HI)))
-		{
-			switch (TargetMsr)
-			{
-			case IA32_SYSENTER_CS:
-				VmxVmread64P(VMCS_GUEST_SYSENTER_CS, &Msr.Flags);
-				break;
-
-			case IA32_SYSENTER_ESP:
-				VmxVmread64P(VMCS_GUEST_SYSENTER_ESP, &Msr.Flags);
-				break;
-
-			case IA32_SYSENTER_EIP:
-				VmxVmread64P(VMCS_GUEST_SYSENTER_EIP, &Msr.Flags);
-				break;
-
-			case IA32_GS_BASE:
-				VmxVmread64P(VMCS_GUEST_GS_BASE, &Msr.Flags);
-				break;
-
-			case IA32_FS_BASE:
-				VmxVmread64P(VMCS_GUEST_FS_BASE, &Msr.Flags);
-				break;
-
-			case HV_X64_MSR_GUEST_IDLE:
-
-				break;
-
-			default:
-
-				//
-				// Check whether the MSR should cause #GP or not
-				//
-				if (TargetMsr <= 0xfff && TestBit(TargetMsr, (unsigned long*)Global::g_MsrBitmapInvalidMsrs) != 0)
-				{
-					//
-					// Invalid MSR between 0x0 to 0xfff
-					//
-					EventInjectGeneralProtection();
-					return Result = FALSE;
-				}
-
-				//
-				// Msr is valid
-				//
-				Msr.Flags = __readmsr(TargetMsr);
-
-				//
-				// Check if it's EFER MSR then we show a false SCE state
-				//
-				if (GuestRegs->rcx == IA32_EFER)
-				{
-					IA32_EFER_REGISTER MsrEFER;
-					MsrEFER.AsUInt = Msr.Flags;
-					MsrEFER.SyscallEnable = TRUE;
-					Msr.Flags = MsrEFER.AsUInt;
-				}
-
-				break;
-			}
-
-			GuestRegs->rax = 0;
-			GuestRegs->rdx = 0;
-
-			GuestRegs->rax = Msr.Fields.Low;
-			GuestRegs->rdx = Msr.Fields.High;
-		}
-		else
-		{
-			//
-			// MSR is invalid, inject #GP
-			//
-			EventInjectGeneralProtection();
-			return Result = FALSE;
-		}
-
+		break;
 	}
 
 	case VMX_EXIT_REASON_EXECUTE_WRMSR: {
 		
-		PGUEST_REGS GuestRegs = VCpu->Regs;
-		MSR     Msr = { 0 };
-		UINT32  TargetMsr;
-		BOOLEAN UnusedIsKernel;
+		auto HandleResult = VMExitHandler::HandleWRMSR(VCpu);
 
-		TargetMsr = GuestRegs->rcx & 0xffffffff;
+		if (HandleResult == FALSE) return Result = FALSE;
 
-		Msr.Fields.Low = (ULONG)GuestRegs->rax;
-		Msr.Fields.High = (ULONG)GuestRegs->rdx;
+		break;
+	}
+	
+	case VMX_EXIT_REASON_EXECUTE_VMCALL: {
 
+		BOOLEAN      IsMyVmcall = FALSE;
+		GUEST_REGS* GuestRegs = VCpu->Regs;
+
+		//DbgBreakPoint();
+
+		IsMyVmcall = (GuestRegs->r10 == 0x48564653 && GuestRegs->r11 == 0x564d43414c4c && GuestRegs->r12 == 0x4e4f485950455256);
 		//
-		// Check for sanity of MSR if they're valid or they're for reserved range for WRMSR and RDMSR
+		// Check if it's our routines that request the VMCALL, or it relates to the Hyper-V
 		//
-		if ((TargetMsr <= 0x00001FFF) || ((0xC0000000 <= TargetMsr) && (TargetMsr <= 0xC0001FFF)) ||
-			(TargetMsr >= RESERVED_MSR_RANGE_LOW && (TargetMsr <= RESERVED_MSR_RANGE_HI)))
+		if (IsMyVmcall)
 		{
-			//
-			// If the source register contains a non-canonical address and ECX specifies
-			// one of the following MSRs:
-			//
-			// IA32_DS_AREA, IA32_FS_BASE, IA32_GS_BASE, IA32_KERNEL_GSBASE, IA32_LSTAR,
-			// IA32_SYSENTER_EIP, IA32_SYSENTER_ESP
-			//
-			switch (TargetMsr)
-			{
-			case IA32_DS_AREA:
-			case IA32_FS_BASE:
-			case IA32_GS_BASE:
-			case IA32_KERNEL_GS_BASE:
-			case IA32_LSTAR:
-			case IA32_SYSENTER_EIP:
-			case IA32_SYSENTER_ESP:
-
-				if (!EPT::CheckAddressCanonicality(Msr.Flags, &UnusedIsKernel))
-				{
-					//
-					// Address is not canonical, inject #GP
-					//
-					EventInjectGeneralProtection();
-
-					return Result = FALSE;
-				}
-
-				break;
-			}
-
-			switch (TargetMsr)
-			{
-			case IA32_SYSENTER_CS:
-				VmxVmwrite64(VMCS_GUEST_SYSENTER_CS, Msr.Flags);
-				break;
-
-			case IA32_SYSENTER_ESP:
-				VmxVmwrite64(VMCS_GUEST_SYSENTER_ESP, Msr.Flags);
-				break;
-
-			case IA32_SYSENTER_EIP:
-				VmxVmwrite64(VMCS_GUEST_SYSENTER_EIP, Msr.Flags);
-				break;
-
-			case IA32_GS_BASE:
-				VmxVmwrite64(VMCS_GUEST_GS_BASE, Msr.Flags);
-				break;
-
-			case IA32_FS_BASE:
-				VmxVmwrite64(VMCS_GUEST_FS_BASE, Msr.Flags);
-				break;
-
-			default:
-
-				__writemsr((unsigned long)GuestRegs->rcx, Msr.Flags);
-				break;
-			}
+			GuestRegs->rax = VMExitHandler::HandleVMCall(VCpu,
+				GuestRegs->rcx,
+				GuestRegs->rdx,
+				GuestRegs->r8,
+				GuestRegs->r9);
 		}
 		else
 		{
-			EventInjectGeneralProtection();
-			return Result = FALSE;
+			// We do not support Hyper-V
+			LOGINF("We do not support Hyper-V");
+			__halt();
 		}
+
+		break;
+	}
+
+	case VMX_EXIT_REASON_EXECUTE_VMCLEAR:
+	case VMX_EXIT_REASON_EXECUTE_VMPTRLD:
+	case VMX_EXIT_REASON_EXECUTE_VMPTRST:
+	case VMX_EXIT_REASON_EXECUTE_VMREAD:
+	case VMX_EXIT_REASON_EXECUTE_VMRESUME:
+	case VMX_EXIT_REASON_EXECUTE_VMWRITE:
+	case VMX_EXIT_REASON_EXECUTE_VMXOFF:
+	case VMX_EXIT_REASON_EXECUTE_VMXON:
+	case VMX_EXIT_REASON_EXECUTE_VMLAUNCH:
+	{
+		//
+		// cf=1 indicate vm instructions fail
+		//
+		EventInjectUndefinedOpcode(VCpu);
+
+		break;
+	}
+	case VMX_EXIT_REASON_EXECUTE_INVEPT:
+	case VMX_EXIT_REASON_EXECUTE_INVVPID:
+	case VMX_EXIT_REASON_EXECUTE_GETSEC:
+	case VMX_EXIT_REASON_EXECUTE_INVD:
+	{
+		//
+		// Handle unconditional vm-exits (inject #ud)
+		//
+		EventInjectUndefinedOpcode(VCpu);
+
+		break;
 	}
 
 	}
@@ -1201,33 +1038,91 @@ extern "C" VOID VmxVmresume() {
 Assembly Wrappers End
 */
 
+VOID VMX::VmxPerformTermination() {
 
+	ULONG ProcessorsCount;
 
-VOID
-VMX::EventInjectInterruption(INTERRUPT_TYPE InterruptionType, EXCEPTION_VECTORS Vector, BOOLEAN DeliverErrorCode, UINT32 ErrorCode)
-{
-	INTERRUPT_INFO Inject = { 0 };
-	Inject.Fields.Valid = TRUE;
-	Inject.Fields.InterruptType = InterruptionType;
-	Inject.Fields.Vector = Vector;
-	Inject.Fields.DeliverCode = DeliverErrorCode;
+	LOGINF("Terminating VMX...\n");
 
-	VmxVmwrite64(VMCS_CTRL_VMENTRY_INTERRUPTION_INFORMATION_FIELD, Inject.Flags);
+	//
+	// Get number of processors
+	//
+	ProcessorsCount = KeQueryActiveProcessorCount(0);
 
-	if (DeliverErrorCode)
+	//
+	// ******* Terminating Vmx *******
+	//
+
+	//
+	// Broadcast to terminate Vmx
+	//
+	KeGenericCallDpc(DpcRoutineTerminateGuest, 0x0);
+
+	//
+	// ****** De-allocatee global variables ******
+	//
+
+	//
+	// Free the buffer related to MSRs that cause #GP
+	//
+	FreeNonPagedPool(Global::g_MsrBitmapInvalidMsrs);
+	Global::g_MsrBitmapInvalidMsrs = NULL;
+
+	//
+	// Free Identity Page Table
+	//
+	for (size_t i = 0; i < ProcessorsCount; i++)
 	{
-		VmxVmwrite64(VMCS_CTRL_VMENTRY_EXCEPTION_ERROR_CODE, ErrorCode);
+		if (Global::g_GuestState[i].EptPageTable != NULL)
+		{
+			MmFreeContiguousMemory(Global::g_GuestState[i].EptPageTable);
+		}
+
+		Global::g_GuestState[i].EptPageTable = NULL;
 	}
+
+	//
+	// Free EptState
+	//
+	FreeNonPagedPool(EPT::g_EptState);
+	EPT::g_EptState = NULL;
+
+	//
+	// Free g_GuestState
+	//
+	FreeNonPagedPool(Global::g_GuestState);
+	Global::g_GuestState = NULL;
+
+	LOGINF("VMX operation turned off successfully");
+
 }
 
-VOID
-VMX::EventInjectGeneralProtection()
-{
-	UINT32 ExitInstrLength;
+BOOLEAN VMX::VmxTerminate() {
+	NTSTATUS                Status = STATUS_SUCCESS;
+	ULONG                   CurrentCore = KeGetCurrentProcessorNumberEx(NULL);
+	VIRTUAL_MACHINE_STATE* VCpu = &Global::g_GuestState[CurrentCore];
 
-	EventInjectInterruption(INTERRUPT_TYPE_HARDWARE_EXCEPTION, EXCEPTION_VECTOR_GENERAL_PROTECTION_FAULT, TRUE, 0);
+	//
+	// Execute Vmcall to to turn off vmx from Vmx root mode
+	//
+	Status = AsmVmxVmcall(VMCALL_VMXOFF, 0, 0, 0);
+	
+	if (Status == STATUS_SUCCESS)
+	{
+		LOGINF("VMX terminated on logical core %d\n", CurrentCore);
 
-	ExitInstrLength = VmxVmread32(VMCS_VMEXIT_INSTRUCTION_LENGTH);
-	VmxVmwrite64(VMCS_CTRL_VMENTRY_INSTRUCTION_LENGTH, ExitInstrLength);
+		//
+		// Free the destination memory
+		//
+		MmFreeContiguousMemory((PVOID)VCpu->VmxonRegionVirtualAddress);
+		MmFreeContiguousMemory((PVOID)VCpu->VmcsRegionVirtualAddress);
+		FreeNonPagedPool((PVOID)VCpu->VmmStack);
+		FreeNonPagedPool((PVOID)VCpu->MsrBitmapVirtualAddress);
+		FreeNonPagedPool((PVOID)VCpu->IoBitmapVirtualAddressA);
+		FreeNonPagedPool((PVOID)VCpu->IoBitmapVirtualAddressB);
 
+		return TRUE;
+	}
+
+	return FALSE;
 }
