@@ -934,36 +934,6 @@ VMX::VmexitHandler(PGUEST_REGS GuestRegs) {
 		break;
 	}
 
-	case VMX_EXIT_REASON_EXECUTE_VMCLEAR:
-	case VMX_EXIT_REASON_EXECUTE_VMPTRLD:
-	case VMX_EXIT_REASON_EXECUTE_VMPTRST:
-	case VMX_EXIT_REASON_EXECUTE_VMREAD:
-	case VMX_EXIT_REASON_EXECUTE_VMRESUME:
-	case VMX_EXIT_REASON_EXECUTE_VMWRITE:
-	case VMX_EXIT_REASON_EXECUTE_VMXOFF:
-	case VMX_EXIT_REASON_EXECUTE_VMXON:
-	case VMX_EXIT_REASON_EXECUTE_VMLAUNCH:
-	{
-		//
-		// cf=1 indicate vm instructions fail
-		//
-		EventInjectUndefinedOpcode(VCpu);
-
-		break;
-	}
-	case VMX_EXIT_REASON_EXECUTE_INVEPT:
-	case VMX_EXIT_REASON_EXECUTE_INVVPID:
-	case VMX_EXIT_REASON_EXECUTE_GETSEC:
-	case VMX_EXIT_REASON_EXECUTE_INVD:
-	{
-		//
-		// Handle unconditional vm-exits (inject #ud)
-		//
-		EventInjectUndefinedOpcode(VCpu);
-
-		break;
-	}
-
 	}
 
 	// -=-=-=-=-= VMEXIT HANDLING =-=-=-=-=-

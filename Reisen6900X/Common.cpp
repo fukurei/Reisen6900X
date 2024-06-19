@@ -149,23 +149,6 @@ EventInjectInterruption(INTERRUPT_TYPE InterruptionType, EXCEPTION_VECTORS Vecto
     }
 }
 
-VOID 
-HvSuppressRipIncrement(VIRTUAL_MACHINE_STATE* VCpu)
-{
-    VCpu->IncrementRip = FALSE;
-}
-
-VOID
-EventInjectUndefinedOpcode(VIRTUAL_MACHINE_STATE* VCpu)
-{
-    EventInjectInterruption(INTERRUPT_TYPE_HARDWARE_EXCEPTION, EXCEPTION_VECTOR_UNDEFINED_OPCODE, FALSE, 0);
-
-    //
-    // Suppress RIP increment
-    //
-    HvSuppressRipIncrement(VCpu);
-}
-
 _Use_decl_annotations_
 BOOLEAN
 VmxLoadVmcs(VIRTUAL_MACHINE_STATE* VCpu)

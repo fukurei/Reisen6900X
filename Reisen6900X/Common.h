@@ -842,25 +842,6 @@ EventInjectInterruption(INTERRUPT_TYPE InterruptionType, EXCEPTION_VECTORS Vecto
 VOID
 EventInjectGeneralProtection();
 
-/**
- * @brief Suppress the incrementation of RIP
- *
- * @param VCpu The virtual processor's state
- *
- * @return VOID
- */
-inline VOID
-HvSuppressRipIncrement(VIRTUAL_MACHINE_STATE* VCpu);
-
-/**
- * @brief Inject #UD to the guest (Invalid Opcode - Undefined Opcode)
- * @param VCpu The virtual processor's state
- *
- * @return VOID
- */
-VOID
-EventInjectUndefinedOpcode(VIRTUAL_MACHINE_STATE* VCpu);
-
 
 /**
 * @brief Clearing Vmcs status using vmclear instruction
